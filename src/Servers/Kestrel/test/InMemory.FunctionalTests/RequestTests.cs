@@ -6,6 +6,7 @@ using System.Collections.Concurrent;
 using System.IO;
 using System.IO.Pipelines;
 using System.Linq;
+using System.Net.Http;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -77,6 +78,50 @@ namespace Microsoft.AspNetCore.Server.Kestrel.InMemory.FunctionalTests
 
                 Assert.False(responseBodyPersisted);
             }
+        }
+
+        [Fact]
+        public async Task MiddlewareIsRunWithConnectionLoggingScopeForHttp2Requests()
+        {
+            await using var server = new TestServer(async context =>
+            {
+                await context.Response.WriteAsync("hello, world");
+            },
+            new TestServiceContext(LoggerFactory),
+            listenOptions =>
+            {
+                listenOptions.Protocols = HttpProtocols.Http2;
+            });
+
+            var connectionCount = 0;
+            using var connection = server.CreateConnection();
+
+            using var socketsHandler = new SocketsHttpHandler()
+            {
+                ConnectCallback = (_, _) =>
+                {
+                    if (connectionCount != 0)
+                    {
+                        throw new InvalidOperationException();
+                    }
+
+                    connectionCount++;
+                    return new ValueTask<Stream>(connection.Stream);
+                },
+            };
+
+            using var httpClient = new HttpClient(socketsHandler);
+
+            using var httpRequsetMessage = new HttpRequestMessage()
+            {
+                RequestUri = new Uri($"http://localhost:{server.Port}/"),
+                Version = new Version(2, 0),
+                VersionPolicy = HttpVersionPolicy.RequestVersionExact,
+            };
+
+            using var responseMessage = await httpClient.SendAsync(httpRequsetMessage);
+
+            Assert.Equal("hello, world", await responseMessage.Content.ReadAsStringAsync());
         }
 
         [Fact]
